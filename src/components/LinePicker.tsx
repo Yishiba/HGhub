@@ -6,6 +6,36 @@ import { ICheck, IClose, IRefresh, ISettings } from "../icons";
 
 type ProbeMap = Record<string, LineProbe>;
 
+/** 检测过且能连上的排最前（按耗时），连不上的其次，没检测过的保持原顺序 */
+function sortByProbe(list: LineItem[], probes: ProbeMap): LineItem[] {
+  const rank = (it: LineItem) => {
+    const p = probes[it.url];
+    return p ? (p.ok ? 0 : 2) : 1;
+  };
+  return list
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => rank(a.it) - rank(b.it)
+      || (rank(a.it) === 0 ? (probes[a.it.url].ms - probes[b.it.url].ms) : 0)
+      || a.i - b.i)
+    .map((x) => x.it);
+}
+
+/** 镜像是「子域 × 域名」的笛卡尔积，同一域名的子域通常同生共死：
+ *  引导检测时每个域名只抽前 2 个，总数不超过 12，避免一次探测几十条。 */
+function sampleMirrors(list: LineItem[]): LineItem[] {
+  const perDomain: Record<string, number> = {};
+  const out: LineItem[] = [];
+  for (const it of list) {
+    const host = it.host || hostOf(it.url);
+    const domain = host.split(".").slice(1).join(".") || host;
+    if ((perDomain[domain] || 0) >= 2) continue;
+    perDomain[domain] = (perDomain[domain] || 0) + 1;
+    out.push(it);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 /* 单条线路：左侧点一下即切换，右侧单独检测 */
 function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
   item: LineItem; current: boolean; probe?: LineProbe; busy: boolean; disabled: boolean;
@@ -32,8 +62,13 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
 }
 
 /* 线路选择：桌面居中弹窗，移动端底部抽屉 */
-export default function LinePicker({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { toast, setUser } = useStore();
+export default function LinePicker({ open, guided = false, onClose }: {
+  open: boolean;
+  /** 从「当前线路连不上」的报错页打开：自动刷新镜像并检测，选好后关闭面板 */
+  guided?: boolean;
+  onClose: () => void;
+}) {
+  const { toast, setUser, bumpLineEpoch } = useStore();
   const [state, setState] = useState<LineState | null>(null);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
@@ -46,27 +81,43 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     api.lineState().then(setState).catch((e) => toast((e as Error).message || "读取线路失败", "info"));
   };
 
-  const readMirrors = async () => {
+  const readMirrors = async (): Promise<LineItem[]> => {
     setLoadingMirrors(true);
     setMirrorErr("");
     try {
       const res = await api.lineMirrors();
-      setMirrors(res?.items || []);
+      const items = res?.items || [];
+      setMirrors(items);
+      return items;
     } catch (e) {
       setMirrors([]);
       setMirrorErr((e as Error).message || "镜像线路获取失败");
+      return [];
     } finally {
       setLoadingMirrors(false);
     }
   };
 
-  /* 镜像线路只在用户点开「线路」后才去拉，拉过一次就留在内存里，可手动刷新 */
+  /* 平时：镜像线路只在用户点开「线路」后才去拉，拉过一次就留在内存里，可手动刷新。
+     引导模式：镜像域名会轮换（旧域名被墙后发布页换新），所以每次都重新拉，并自动检测一遍。 */
   useEffect(() => {
     if (!open) return;
-    readState();
-    if (mirrors === null) void readMirrors();
+    if (!guided) {
+      readState();
+      if (mirrors === null) void readMirrors();
+      return;
+    }
+    setProbes({});
+    void (async () => {
+      const [st, list] = await Promise.all([
+        api.lineState().catch(() => null),
+        readMirrors(),
+      ]);
+      if (st) setState(st);
+      await probe([...(st?.fixed || []), ...sampleMirrors(list)], "guided");
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, guided]);
 
   const probe = async (list: LineItem[], key: string) => {
     if (!list.length) return;
@@ -92,7 +143,9 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
       const next = await api.lineSet(url);
       if (next !== state?.base) setUser(null);
       setState((s) => (s ? { ...s, base: next } : s));
+      bumpLineEpoch();
       toast(`线路已切换到 ${hostOf(next)}，跨站点需重新登录`, "ok");
+      if (guided) onClose();
     } catch (e) {
       toast((e as Error).message || "切换失败", "info");
     } finally {
@@ -100,7 +153,9 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     }
   };
 
-  const fixed = state?.fixed || [];
+  const fixed = sortByProbe(state?.fixed || [], probes);
+  const mirrorRows = mirrors ? sortByProbe(mirrors, probes) : null;
+  const okCount = Object.values(probes).filter((p) => p.ok).length;
   const busyAll = !!probing || !!switching;
 
   const body = (
@@ -109,12 +164,21 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ISettings size={16} /></span>
         <div className="flex-1 min-w-0">
           <div className="text-[14px] font-bold text-on leading-tight">线路</div>
-          <div className="text-[10.5px] text-mut mt-0.5 truncate">当前：{state ? hostOf(state.base) : "读取中…"}</div>
+          <div className="text-[10.5px] text-mut mt-0.5 truncate">当前：{state ? hostOf(state.base) : "读取中…"}{state?.auto ? "（启动时自动选择）" : ""}</div>
         </div>
         <button onClick={onClose} aria-label="关闭" className="w-8 h-8 rounded-full bg-s3/80 flex items-center justify-center text-mut pressable"><IClose size={16} /></button>
       </div>
 
       <div className="flex-1 scroll-y px-3 pb-4">
+        {guided && (
+          <div className="mx-1 mb-2 rounded-(--r-md) bg-s2 px-3 py-2.5 text-[11px] leading-relaxed text-on/85">
+            {probing === "guided"
+              ? "当前线路连不上，正在拉取最新镜像并检测可用线路…"
+              : okCount
+                ? `当前线路连不上，多半是被网络限制。找到 ${okCount} 条能连上的线路（已排在前面），点一条即可切换。`
+                : "当前线路连不上，检测到的线路也都连不上。可以稍后再试，或开启代理 / VPN 后再选择。"}
+          </div>
+        )}
         <div className="flex items-center gap-2 px-1 mt-1 mb-1.5">
           <span className="text-[10.5px] font-semibold text-dim tracking-wide">固定线路</span>
           <span className="text-[10px] text-dim">需代理 / 非大陆网络</span>
@@ -150,7 +214,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
           {!loadingMirrors && !mirrorErr && mirrors?.length === 0 && (
             <div className="px-3.5 py-3 text-[11px] text-mut">地址发布页里没有可用的镜像地址</div>
           )}
-          {!loadingMirrors && (mirrors || []).map((it) => (
+          {!loadingMirrors && (mirrorRows || []).map((it) => (
             <Row key={it.url} item={it} current={state?.base === it.url} probe={probes[it.url]}
               busy={probing === it.url} disabled={busyAll} onPick={pick} onProbe={(u) => probe([{ url: u }], u)} />
           ))}
@@ -165,7 +229,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换，只有点「检测」时才探测一次。
+          切换后立即生效，请求链路与数据模型不变。启动时如果你选的线路连不上，会自动换到一条能用的线路（不改你的选择，恢复后自动换回）；手动选择的线路始终优先。检测会真的请求一次接口，绿色表示能正常拉到内容。
         </div>
       </div>
     </div>

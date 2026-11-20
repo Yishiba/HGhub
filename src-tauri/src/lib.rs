@@ -1,4 +1,5 @@
 mod api;
+mod line_select;
 mod lines;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -7,6 +8,7 @@ mod media;
 mod net;
 mod network_policy;
 mod playback_log;
+mod remote_config;
 mod session;
 
 use api::Api;
@@ -55,9 +57,16 @@ pub fn run() {
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
+                // 先绑定日志，远程配置的加载过程才能记下来
+                playback_log::bind(&dir);
+                // 远程配置（签名的线路 / 发布页清单）要在恢复线路之前读回，默认线路取决于它
+                remote_config::bind(&dir);
                 // 上次选择的线路（设置 → 线路）在启动时恢复
                 net::bind_base(&dir);
-                playback_log::bind(&dir);
+                // 后台拉取最新配置：不阻塞启动，新的默认线路下次启动生效
+                tauri::async_runtime::spawn(remote_config::refresh());
+                // 冷启动自动选线路：首选线路连不上时换到能用的线路；业务请求会等它结束（有上限）
+                tauri::async_runtime::spawn(line_select::run());
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -140,6 +149,7 @@ pub fn run() {
             api::debug_log,
             api::net_diag,
             api::line_state,
+            api::line_ready,
             api::line_set,
             api::line_mirrors,
             api::line_probe,

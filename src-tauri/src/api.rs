@@ -18,6 +18,7 @@ impl Api {
     }
 
     async fn get(&self, path: &str) -> Result<Value, String> {
+        crate::line_select::wait_ready().await;
         let origin = base();
         let token = self.session.token(&origin);
         edge(&origin, "GET", path, None, token.as_deref()).await
@@ -25,12 +26,14 @@ impl Api {
 
     /// POST（游客也可调用，有登录态时带上 token）：新播放接口需要。
     async fn post(&self, path: &str, body: Option<Value>) -> Result<Value, String> {
+        crate::line_select::wait_ready().await;
         let origin = base();
         let token = self.session.token(&origin);
         edge(&origin, "POST", path, body, token.as_deref()).await
     }
 
     async fn authed(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+        crate::line_select::wait_ready().await;
         let origin = base();
         let token = self
             .session
@@ -56,13 +59,31 @@ pub async fn net_diag() -> Result<Value, String> {
 
 /* ───────────────────────── 线路（数据源） ───────────────────────── */
 
+/// 等冷启动选线路结束，返回最终线路与该线路下的登录态（`app_boot` 不等它，避免拖慢其余启动状态）。
+#[tauri::command]
+pub async fn line_ready(state: State<'_, Api>) -> Result<Value, String> {
+    crate::line_select::wait_ready().await;
+    let origin = base();
+    let preferred = crate::net::preferred_base();
+    Ok(json!({
+        "base": origin,
+        "preferred": preferred,
+        "auto": origin != preferred,
+        "user": state.session.user(&origin),
+        "logged_in": state.session.token(&origin).is_some(),
+    }))
+}
+
 /// 当前线路 + 固定线路清单（镜像线路另外按需拉取）。
 #[tauri::command]
 pub async fn line_state() -> Result<Value, String> {
     Ok(json!({
         "base": base(),
-        "default": crate::net::DEFAULT_BASE,
+        "default": crate::remote_config::default_base(),
+        "preferred": crate::net::preferred_base(),
+        "auto": base() != crate::net::preferred_base(),
         "fixed": crate::lines::fixed(),
+        "config": crate::remote_config::status(),
     }))
 }
 
@@ -317,6 +338,7 @@ pub async fn api_login(
     username: String,
     password: String,
 ) -> Result<Value, String> {
+    crate::line_select::wait_ready().await;
     let origin = base();
     let data = edge(
         &origin,
@@ -346,6 +368,7 @@ pub async fn api_register(
     password: String,
     email: String,
 ) -> Result<Value, String> {
+    crate::line_select::wait_ready().await;
     let origin = base();
     let mut body = json!({
         "username": username,
@@ -378,6 +401,7 @@ pub async fn api_register(
 
 #[tauri::command]
 pub async fn api_logout(state: State<'_, Api>) -> Result<Value, String> {
+    crate::line_select::wait_ready().await;
     let origin = base();
     let token = state.session.token(&origin);
     let _ = edge(
@@ -394,6 +418,7 @@ pub async fn api_logout(state: State<'_, Api>) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn api_me(state: State<'_, Api>) -> Result<Value, String> {
+    crate::line_select::wait_ready().await;
     let origin = base();
     let token = state.session.token(&origin);
     let me = edge(&origin, "GET", "/api/account/me", None, token.as_deref()).await?;

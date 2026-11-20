@@ -2,18 +2,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
-import LinePicker from "../components/LinePicker";
 import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, usePlaybackLog } from "../playbackDiagnostics";
 import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute } from "../icons";
 
 /* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
+  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast, openLinePicker, linePicker, lineEpoch } = useStore();
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const [lineOpen, setLineOpen] = useState(false);
   const [lineBase, setLineBase] = useState("");
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
@@ -23,7 +21,8 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const readLine = () => {
     api.lineState().then((s) => setLineBase(s.base)).catch(() => {});
   };
-  useEffect(readLine, []);
+  // 线路面板是全局的：关闭或切换线路后重新读一次当前线路
+  useEffect(readLine, [linePicker.open, lineEpoch]);
   useEffect(() => { void initPlaybackLog(); }, []);
 
   const checkUpdate = async () => {
@@ -107,7 +106,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </Section>
 
           <Section title="网络">
-            <button onClick={() => setLineOpen(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+            <button onClick={() => openLinePicker(false)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IBoltF size={16} /></span>
               <div className="flex-1 min-w-0">
                 <div className="text-[12.5px] text-on">线路</div>
@@ -204,8 +203,6 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {platform === "android" ? "Android" : platform === "ios" ? "iOS" : platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows"} 客户端</div>
         </div>
       </div>
-
-      <LinePicker open={lineOpen} onClose={() => { setLineOpen(false); readLine(); }} />
 
       <Modal open={about} onClose={() => setAbout(false)} width={392}>
         <div className="p-5">

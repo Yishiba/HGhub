@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, fmt } from "../api";
+import { api, fmt, isLineDown } from "../api";
 import type { Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RowCard } from "../components/cards";
@@ -153,13 +153,14 @@ function PreviewStatus({ name, loading, error, onRetry }: { name: string; loadin
 
 /* ================= 频道详情页 ================= */
 export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
-  const { push } = useStore();
+  const { push, openLinePicker } = useStore();
   const [sort, setSort] = useState<"最新" | "最热" | "高分">("最新");
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [lineDown, setLineDown] = useState(false);
   const busy = useRef(false);
   const sentinel = useRef<HTMLDivElement>(null);
 
@@ -177,8 +178,10 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
       setPage(next);
       setPages(res?.pagination?.pages || next);
       setErr(null);
+      setLineDown(false);
     } catch (e) {
       setErr((e as Error).message || "加载失败");
+      setLineDown(isLineDown(e));
     } finally {
       busy.current = false;
       setLoading(false);
@@ -224,7 +227,12 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
         {sorted.length ? (
           <Masonry videos={sorted} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: sorted.map((x) => x.id), index: sorted.findIndex((x) => x.id === v.id), title: name })} />
         ) : err ? (
+          lineDown ? (
+          <Empty icon={<IGrid size={26} />} title="加载失败" sub={err} action="切换线路"
+            onAction={() => openLinePicker(true)} secondary="重试" onSecondary={loadMore} />
+        ) : (
           <Empty icon={<IGrid size={26} />} title="加载失败" sub={err} action="重试" onAction={loadMore} />
+        )
         ) : (
           <div className="flex justify-center py-10"><div className="w-8 h-8 spinner" /></div>
         )}

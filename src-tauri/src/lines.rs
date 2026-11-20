@@ -7,30 +7,39 @@
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-/// 固定线路：写死在客户端里，不依赖任何外部页面。
-pub const FIXED: [(&str, &str); 2] = [
-    ("固定线路 1", "https://huangguoai.com"),
-    ("固定线路 2", "https://huangguoai.ai"),
-];
+// 固定线路与发布页清单来自签名的远程配置，拿不到时回退内置默认值，见 `remote_config`。
 
-const PUBLISH_PAGE: &str = "https://huangguoai.pages.dev/";
 /// 镜像列表上限（子域 × 域名是笛卡尔积，界面只展示这么多）
 const MIRROR_MAX: usize = 60;
-/// 单条线路探测超时
-const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn fixed() -> Value {
-    json!(FIXED
+    json!(crate::remote_config::fixed_lines()
         .iter()
         .map(|(name, url)| json!({ "name": name, "url": url }))
         .collect::<Vec<_>>())
 }
 
-/// 拉地址发布页 → 解析 publish.js → 拼出镜像地址。只在用户点开「线路」时调用。
+/// 依次尝试各发布页，第一个能解析出镜像地址的为准。只在用户点开「线路」时调用。
 pub async fn mirrors() -> Result<Value, String> {
-    let html = get_text(PUBLISH_PAGE).await?;
+    let pages = crate::remote_config::publish_pages();
+    if pages.is_empty() {
+        return Err("当前配置没有提供镜像线路".to_string());
+    }
+    let mut last_err = String::new();
+    for page in &pages {
+        match mirrors_from(page).await {
+            Ok(v) => return Ok(v),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// 拉一个地址发布页 → 解析 publish.js → 拼出镜像地址。
+async fn mirrors_from(page: &str) -> Result<Value, String> {
+    let html = get_text(page).await?;
     let js_rel = script_src(&html).unwrap_or_else(|| "publish.js".to_string());
-    let js_url = absolute(PUBLISH_PAGE, &js_rel);
+    let js_url = absolute(page, &js_rel);
     let js = get_text(&js_url).await?;
 
     let domains = js_array(&js, "var urls");
@@ -65,7 +74,7 @@ pub async fn mirrors() -> Result<Value, String> {
         return Err("地址发布页里没有可用的镜像地址".to_string());
     }
 
-    Ok(json!({ "source": PUBLISH_PAGE, "script": js_url, "items": items }))
+    Ok(json!({ "source": page, "script": js_url, "items": items }))
 }
 
 /// 可达性探测（并发 6 条一组）。只报结果，不做自动切换。
@@ -86,23 +95,20 @@ pub async fn probe(urls: Vec<String>) -> Value {
     json!(out)
 }
 
+/// 用真实接口检测（见 `line_select::api_probe`）：只看首页能不能打开会误判
+/// （`huangguoai.ai` 首页 200 但接口 404）。
 async fn probe_one(url: String) -> Value {
-    let target = format!("{}/", url.trim_end_matches('/'));
     let started = Instant::now();
-    let res = crate::net::get(
-        &target,
-        PROBE_TIMEOUT,
-        Some("text/html,application/xhtml+xml"),
-        None,
-    )
-    .await;
-    let ms = started.elapsed().as_millis() as u64;
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            json!({ "url": url, "ok": status < 400, "status": status, "ms": ms })
+    match crate::line_select::api_probe(&url).await {
+        Ok(ms) => json!({ "url": url, "ok": true, "ms": ms }),
+        Err(e) => {
+            let ms = started.elapsed().as_millis() as u64;
+            let status = e
+                .strip_prefix("HTTP ")
+                .and_then(|s| s.get(..3))
+                .and_then(|s| s.parse::<u16>().ok());
+            json!({ "url": url, "ok": false, "ms": ms, "status": status, "error": e })
         }
-        Err(e) => json!({ "url": url, "ok": false, "ms": ms, "error": e }),
     }
 }
 

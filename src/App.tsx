@@ -11,6 +11,7 @@ import SettingsPage from "./pages/Settings";
 import Feed from "./components/Feed";
 import { PostsPage, PostDetail } from "./pages/Posts";
 import LoginModal from "./components/LoginModal";
+import LinePicker from "./components/LinePicker";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
@@ -82,7 +83,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
 
 /* ============ 应用主体 ============ */
 function AppBody() {
-  const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs, clean } = useStore();
+  const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs, clean, lineEpoch } = useStore();
   const isMobile = platform === "android" || platform === "ios";
   const mainRef = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(!isMobile);
@@ -128,7 +129,7 @@ function AppBody() {
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!isMobile && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
+        <div className={vis("home")}><Home key={lineEpoch} active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
         <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
         <div className={vis("profile")}><Profile wide={wide} /></div>
@@ -162,7 +163,7 @@ function DesktopShell() {
 }
 
 function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boolean }) {
-  const { stack, pop, loginOpen, setLoginOpen, tab, setTab, platform } = useStore();
+  const { stack, pop, loginOpen, setLoginOpen, tab, setTab, platform, lineEpoch } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(true);
 
@@ -200,7 +201,7 @@ function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boole
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!theater && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className={`relative flex-1 min-w-0 overflow-hidden win-main ${theater ? "is-theater-main" : ""}`}>
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} /></div>
+        <div className={vis("home")}><Home key={lineEpoch} active={pageActive && tab === "home"} bottomInset={14} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
         <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
         <div className={vis("profile")}><Profile wide={wide} /></div>
@@ -229,7 +230,7 @@ function MobileShell() {
 
 /* ============ 入口 ============ */
 export default function App() {
-  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs } = useStore();
+  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, linePicker, closeLinePicker } = useStore();
   useEffect(() => {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);
@@ -279,6 +280,7 @@ export default function App() {
     <>
       {isMobile ? <MobileShell /> : <DesktopShell />}
       <LoginModal />
+      <LinePicker open={linePicker.open} guided={linePicker.guided} onClose={closeLinePicker} />
       <ToastHost />
       {/* 登录遮罩键盘处理占位 */}
       {loginOpen && <div className="hidden" onClick={() => setLoginOpen(false)} />}

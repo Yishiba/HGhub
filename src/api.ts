@@ -43,6 +43,34 @@ export const playlist = (url: string) => `${LOCAL}/hls?u=${encodeURIComponent(ur
 /** 写一行到应用数据目录 debug.log（用户反馈「打不开」时要的就是它） */
 export const logLine = (msg: string) => invoke("debug_log", { msg }).catch(() => {});
 
+/** 当前线路连不上（DNS 污染 / 连接超时 / 被重置 / 解析到的地址全部不合格）。
+ *  界面据此提示「切换线路」，而不是只给一个「重试」。 */
+export class LineDownError extends Error {
+  readonly raw: string;
+  constructor(message: string, raw: string) {
+    super(message);
+    this.name = "LineDownError";
+    this.raw = raw;
+  }
+}
+export const isLineDown = (e: unknown): e is LineDownError => e instanceof LineDownError;
+
+/** 连接层失败的特征（来自 reqwest 错误链与 Rust 侧网络策略的报错文案）。
+ *  只看连接层：HTTP 状态码、业务错误、代理配置错误都不算「线路连不上」。 */
+const LINE_DOWN = /error sending request|timed out|\(Connect\)|connection (refused|reset|closed)|dns error|DNS 解析|请求超时|handshake|unexpected eof|禁止访问普通内网|目标没有可用的 DNS 地址/i;
+const PROXY_ERROR = /tunnel|proxy/i;
+
+export function classifyLineDown(cmd: string, msg: string): boolean {
+  // 只有业务接口（走当前线路）才算；线路检测 / 镜像清单自己会展示结果
+  return cmd.startsWith("api_") && LINE_DOWN.test(msg) && !PROXY_ERROR.test(msg);
+}
+
+/** 错误链 `a ← b ← c` 取最后一环（最具体的原因），给用户看的提示里只带这一小段 */
+const lastCause = (msg: string) => {
+  const tail = msg.split("←").pop()?.trim() || msg;
+  return tail.length > 60 ? `${tail.slice(0, 60)}…` : tail;
+};
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return (await invoke(cmd, args)) as T;
@@ -53,6 +81,9 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
     if (status) {
       throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
+    }
+    if (classifyLineDown(cmd, msg)) {
+      throw new LineDownError(`当前线路连不上，可能被网络限制，换一条线路试试（${lastCause(msg)}）`, msg);
     }
     throw new Error(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
   }
@@ -108,6 +139,8 @@ export const api = {
 
   /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */
   lineState: () => call<LineState>("line_state"),
+  /** 等冷启动自动选线路结束 */
+  lineReady: () => call<LineReady>("line_ready"),
   lineSet: (url: string) => call<string>("line_set", { url }),
   lineMirrors: () => call<LineMirrors>("line_mirrors"),
   lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
@@ -133,7 +166,12 @@ export type UpdateInfo = {
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
 export type LineItem = { name?: string; url: string; host?: string };
-export type LineState = { base: string; default: string; fixed: LineItem[] };
+export type LineState = {
+  base: string; default: string; fixed: LineItem[];
+  /** 首选线路（手动选择或默认线路）；`auto` 表示当前线路是冷启动自动选出来的 */
+  preferred?: string; auto?: boolean;
+};
+export type LineReady = { base: string; preferred: string; auto: boolean; user: User | null; logged_in: boolean };
 export type LineMirrors = { source: string; script?: string; items: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
 

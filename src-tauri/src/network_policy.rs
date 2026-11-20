@@ -166,22 +166,38 @@ fn check_ip(ip: IpAddr) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-pub fn check_addresses(addrs: &[SocketAddr]) -> Result<(), String> {
-    check_addresses_with_mode(addrs, strict_security())
-}
-
-pub fn check_addresses_with_mode(addrs: &[SocketAddr], strict: bool) -> Result<(), String> {
+/// 严格模式下剔除不合格地址，只返回可以连接的那部分；一个都不剩才报错。
+///
+/// 以前是「混合公私网答案整体拒绝」。但国内 DNS 会间歇性把 AAAA 污染成 Teredo `2001::/32`
+/// 这类保留地址（实测 `thu.adihsppe.cc` → `2001::9df0:a20`，同时 A 记录是真实 CloudFront），
+/// 双栈网络（如电信 5G）上整组拒绝会让本来可用的 IPv4 一起陪葬，报「禁止访问…保留地址」。
+/// 剔除仍然安全：返回值会经 `resolve_to_addrs` 固定给连接器（见 `net::build_client`），
+/// 被剔除的地址永远不会交给连接器，所以连接器不会回退到私网地址。
+pub fn usable_addresses_with_mode(
+    addrs: Vec<SocketAddr>,
+    strict: bool,
+) -> Result<Vec<SocketAddr>, String> {
     if addrs.is_empty() {
         return Err("目标没有可用的 DNS 地址".into());
     }
-    if strict {
-        // 混合公私网答案整体拒绝，不能让连接器回退到私网地址。
-        for addr in addrs {
-            check_ip(addr.ip())?;
-        }
+    if !strict {
+        return Ok(addrs);
     }
-    Ok(())
+    let mut rejected = None;
+    let usable: Vec<SocketAddr> = addrs
+        .into_iter()
+        .filter(|addr| match check_ip(addr.ip()) {
+            Ok(()) => true,
+            Err(e) => {
+                rejected.get_or_insert(e);
+                false
+            }
+        })
+        .collect();
+    match (usable.is_empty(), rejected) {
+        (true, Some(e)) => Err(e),
+        _ => Ok(usable),
+    }
 }
 
 /// 与浏览器一致优先 IPv6：连接器以首个地址的协议族为首选，另一族在其失败后（Happy Eyeballs）兜底。
@@ -207,7 +223,19 @@ pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, 
     };
     sort_ipv6_first(&mut addrs);
     addrs.dedup();
-    check_addresses_with_mode(&addrs, strict)?;
+    let total = addrs.len();
+    let addrs = usable_addresses_with_mode(addrs, strict)?;
+    if addrs.len() < total {
+        // 只记数量与协议族，不记具体地址（与 net::dns_summary 的脱敏口径一致）。
+        crate::playback_log::record(
+            "dns.filtered",
+            json!({
+                "kept": addrs.len(),
+                "dropped": total - addrs.len(),
+                "kept_ipv4": addrs.iter().filter(|a| a.is_ipv4()).count(),
+            }),
+        );
+    }
     Ok(addrs)
 }
 
@@ -350,14 +378,47 @@ mod tests {
         assert!(parse_target("http://198.18.0.1/video").is_ok());
     }
 
+    fn sa(raw: &str) -> SocketAddr {
+        raw.parse().unwrap()
+    }
+
     #[test]
-    fn mixed_dns_and_redirect_bypasses_are_blocked() {
-        let addrs = [
-            "1.1.1.1:443".parse().unwrap(),
-            "192.168.1.1:443".parse().unwrap(),
-        ];
-        assert!(check_addresses(&addrs).is_err());
-        assert!(check_addresses(&[]).is_err());
+    fn mixed_dns_answers_keep_only_public_addresses() {
+        // 私网地址被剔除，绝不交给连接器
+        assert_eq!(
+            usable_addresses_with_mode(vec![sa("1.1.1.1:443"), sa("192.168.1.1:443")], true),
+            Ok(vec![sa("1.1.1.1:443")])
+        );
+        // 实测的国内 AAAA 污染：Teredo 假地址 + 真实 CloudFront IPv4
+        assert_eq!(
+            usable_addresses_with_mode(
+                vec![sa("[2001::9df0:a20]:443"), sa("99.84.215.85:443")],
+                true
+            ),
+            Ok(vec![sa("99.84.215.85:443")])
+        );
+        // FakeIP 照常放行，VPN 的 ULA 假 IPv6 被剔除
+        assert_eq!(
+            usable_addresses_with_mode(vec![sa("[fc00::1]:443"), sa("198.18.0.22:443")], true),
+            Ok(vec![sa("198.18.0.22:443")])
+        );
+        // 全部不合格、或没有地址，仍然拒绝
+        assert!(usable_addresses_with_mode(
+            vec![sa("192.168.1.1:443"), sa("[::1]:443"), sa("[2001::1]:443")],
+            true
+        )
+        .is_err());
+        assert!(usable_addresses_with_mode(vec![], true).is_err());
+        assert!(usable_addresses_with_mode(vec![], false).is_err());
+        // 兼容模式不做剔除
+        assert_eq!(
+            usable_addresses_with_mode(vec![sa("1.1.1.1:443"), sa("192.168.1.1:443")], false),
+            Ok(vec![sa("1.1.1.1:443"), sa("192.168.1.1:443")])
+        );
+    }
+
+    #[test]
+    fn redirect_bypasses_are_blocked() {
         let current = Url::parse("https://example.com/media").unwrap();
         assert!(redirect_target(&current, "//127.0.0.1/private").is_err());
         assert!(redirect_target(&current, "http://example.com/media").is_err());
