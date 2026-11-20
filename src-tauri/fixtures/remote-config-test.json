@@ -1,0 +1,5 @@
+{
+  "alg": "ed25519",
+  "payload": "eyJzY2hlbWEiOjEsInZlcnNpb24iOjcsImlzc3VlZF9hdCI6IjIwMjYtMTEtMTZUMDA6MDA6MDBaIiwibGluZXMiOlt7Im5hbWUiOiLmtYvor5Xnur/ot68gQSIsInVybCI6Imh0dHBzOi8vYS5leGFtcGxlLmNvbSJ9LHsibmFtZSI6Iua1i+ivlee6v+i3ryBCIiwidXJsIjoiaHR0cHM6Ly9iLmV4YW1wbGUuY29tIn1dLCJkZWZhdWx0IjoiaHR0cHM6Ly9iLmV4YW1wbGUuY29tIiwicHVibGlzaF9wYWdlcyI6WyJodHRwczovL3B1Yi5leGFtcGxlLmNvbS8iXX0=",
+  "sig": "eFQvjNrkcdMuUIygHJtlTWSBIqNPXkOl6a+CcJCDqPhSMVbQPj33JoJxpZrX5bYjP+dv2G60VZ1xWtEBJU17CQ=="
+}

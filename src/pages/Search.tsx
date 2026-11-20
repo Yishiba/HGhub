@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, fmt } from "../api";
+import { api, fmt, isLineDown } from "../api";
 import type { RankItem, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RankRow } from "../components/cards";
@@ -9,7 +9,7 @@ import { IBack, IClose, IFireF, IRefresh, ISearch, ITrophy } from "../icons";
 const HOT_TAGS = ["都市", "逆袭", "古风", "系统", "后宫", "校园", "仙侠", "职场", "大男主", "御姐", "脑洞", "奇幻"];
 
 export default function Search({ active, wide }: { active: boolean; wide: boolean }) {
-  const { push, searchHist, addSearch, clearSearchHist, toast } = useStore();
+  const { push, searchHist, addSearch, clearSearchHist, toast, openLinePicker } = useStore();
   const [q, setQ] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [items, setItems] = useState<VideoCard[]>([]);
@@ -17,6 +17,7 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [lineDown, setLineDown] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const busy = useRef(false);
 
@@ -39,8 +40,10 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
       setPage(p);
       setPages(res?.pagination?.pages || 1);
       setErr(null);
+      setLineDown(false);
     } catch (e) {
       setErr((e as Error).message || "搜索失败");
+      setLineDown(isLineDown(e));
     } finally {
       busy.current = false;
       setLoading(false);
@@ -131,8 +134,13 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
             ) : loading ? (
               <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
             ) : (
-              <Empty icon={<ISearch size={26} />} title={err || "没有找到相关内容"} sub="换个关键词试试，比如「都市」「逆袭」"
-                action="看看热榜" onAction={() => push({ kind: "ranks" })} />
+              lineDown ? (
+                <Empty icon={<ISearch size={26} />} title="搜索失败" sub={err || ""} action="切换线路"
+                  onAction={() => openLinePicker(true)} secondary="重试" onSecondary={() => run(submitted, 1)} />
+              ) : (
+                <Empty icon={<ISearch size={26} />} title={err || "没有找到相关内容"} sub="换个关键词试试，比如「都市」「逆袭」"
+                  action="看看热榜" onAction={() => push({ kind: "ranks" })} />
+              )
             )}
           </>
         )}

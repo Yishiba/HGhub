@@ -30,13 +30,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-/// 默认上游（固定线路 1）。
-pub const DEFAULT_BASE: &str = "https://huangguoai.com";
+/// 内置默认上游（固定线路 1）。远程配置可以换掉默认线路，见 [`crate::remote_config::default_base`]。
+pub const DEFAULT_BASE: &str = crate::remote_config::BUILTIN_DEFAULT;
 
 /// 当前上游基址（不带结尾斜杠）。可在设置里切到固定线路 2 或镜像线路，运行时立即生效。
 static BASE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(DEFAULT_BASE.to_string()));
+/// 首选线路：用户手动选过的线路（`line.json`），没选过就是默认线路。
+/// 冷启动自动选线路（见 `line_select`）只在首选线路连不上时才改 [`BASE`]，从不改首选线路。
+static PREFERRED: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(DEFAULT_BASE.to_string()));
 /// 线路配置落盘位置（应用数据目录/line.json），由 [`bind_base`] 在启动时绑定。
 static BASE_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+/// 上次自动选中的线路（应用数据目录/line_auto.json）。与 `line.json` 分开，不覆盖用户的手动选择。
+static AUTO_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+/// 每次手动切换线路 +1。自动选线路开始前记下它，结束时变了就说明用户已手动选择，放弃自动结果。
+static MANUAL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 当前上游基址。
 pub fn base() -> String {
@@ -63,39 +70,98 @@ pub fn trusted_auth_origin(origin: &str) -> bool {
     matches!(origin, "https://huangguoai.com" | "https://huangguoai.ai")
 }
 
-/// 启动时读回上次选择的线路（文件不存在 / 内容坏了就保持默认）。
+/// 启动时读回上次选择的线路；没选过（或文件坏了）就用默认线路。
+/// 默认线路取自远程配置（须先调用 `remote_config::bind`），没有有效配置时为内置默认值。
+/// 只在启动时决定一次，会话中途拉到新配置不会悄悄换站点。
 pub fn bind_base(dir: &std::path::Path) {
     network_policy::bind_security(dir);
     let path = dir.join("line.json");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-            if let Some(next) = v
-                .get("base")
-                .and_then(|x| x.as_str())
-                .and_then(normalize_base)
-            {
-                if let Ok(mut cur) = BASE.write() {
-                    *cur = next;
-                }
-            }
-        }
+    let chosen = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.get("base").and_then(|x| x.as_str()).and_then(normalize_base));
+    let next = chosen.unwrap_or_else(crate::remote_config::default_base);
+    if let Ok(mut cur) = BASE.write() {
+        *cur = next.clone();
+    }
+    if let Ok(mut p) = PREFERRED.write() {
+        *p = next;
     }
     if let Ok(mut f) = BASE_FILE.write() {
         *f = Some(path);
     }
+    if let Ok(mut f) = AUTO_FILE.write() {
+        *f = Some(dir.join("line_auto.json"));
+    }
 }
 
-/// 切换线路并落盘，返回规整后的地址。
-pub fn set_base(url: &str) -> Result<String, String> {
-    let next = normalize_base(url)
-        .ok_or_else(|| "线路地址无效（需要纯 HTTPS 站点地址，禁止内网）".to_string())?;
+/// 首选线路（用户手动选择或默认线路）。
+pub fn preferred_base() -> String {
+    PREFERRED
+        .read()
+        .map(|b| b.clone())
+        .unwrap_or_else(|_| DEFAULT_BASE.to_string())
+}
+
+pub fn manual_epoch() -> u64 {
+    MANUAL_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 上次自动选中的线路（文件不存在 / 内容无效时为 `None`）。
+pub fn last_auto_base() -> Option<String> {
+    let path = AUTO_FILE.read().ok().and_then(|p| p.clone())?;
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| v.get("base").and_then(|x| x.as_str()).and_then(normalize_base))
+}
+
+/// 采用自动选中的线路：只改当前线路并记到 `line_auto.json`，不动首选线路和登录态
+/// （会话与站点绑定，镜像上自然是游客；首选线路恢复后登录态还在）。
+pub fn apply_auto_base(url: &str) {
+    let Some(next) = normalize_base(url) else { return };
     let previous = base();
     if let Ok(mut cur) = BASE.write() {
         *cur = next.clone();
     }
+    if let Some(path) = AUTO_FILE.read().ok().and_then(|p| p.clone()) {
+        let _ = std::fs::write(path, json!({ "base": next }).to_string());
+    }
+    if previous != next {
+        refresh_client();
+        crate::playback_log::record(
+            "line.auto_selected",
+            json!({
+                "previous_host": url::Url::parse(&previous).ok().and_then(|u| u.host_str().map(str::to_owned)),
+                "line_host": url::Url::parse(&next).ok().and_then(|u| u.host_str().map(str::to_owned)),
+            }),
+        );
+    }
+}
+
+/// 首选线路已恢复可用：下次启动不再优先尝试旧的自动线路。
+pub fn clear_auto_base() {
+    if let Some(path) = AUTO_FILE.read().ok().and_then(|p| p.clone()) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 切换线路并落盘，返回规整后的地址。手动选择即成为首选线路，并清掉自动选线路的记录。
+pub fn set_base(url: &str) -> Result<String, String> {
+    let next = normalize_base(url)
+        .ok_or_else(|| "线路地址无效（需要纯 HTTPS 站点地址，禁止内网）".to_string())?;
+    let previous = base();
+    MANUAL_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut cur) = BASE.write() {
+        *cur = next.clone();
+    }
+    if let Ok(mut p) = PREFERRED.write() {
+        *p = next.clone();
+    }
     if let Some(path) = BASE_FILE.read().ok().and_then(|p| p.clone()) {
         let _ = std::fs::write(path, json!({ "base": next }).to_string());
     }
+    clear_auto_base();
     if previous != next {
         crate::playback_log::record(
             "line.changed",
@@ -365,6 +431,7 @@ pub async fn diagnose() -> Value {
     json!({
         "base": cur,
         "host": host,
+        "remote_config": crate::remote_config::status(),
         "dns": dns,
         "http": http,
         "env": {

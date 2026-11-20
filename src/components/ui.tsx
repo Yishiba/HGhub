@@ -70,8 +70,10 @@ export function Toggle({ on, onChange, label, disabled = false }: { on: boolean;
 }
 
 /* ——— 空状态 ——— */
-export function Empty({ icon, title, sub, action, onAction }: {
+export function Empty({ icon, title, sub, action, onAction, secondary, onSecondary }: {
   icon: React.ReactNode; title: string; sub?: string; action?: string; onAction?: () => void;
+  /** 次要操作（文字按钮），例如主按钮是「切换线路」时保留一个「重试」 */
+  secondary?: string; onSecondary?: () => void;
 }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 px-8 text-center a-rise">
@@ -80,6 +82,9 @@ export function Empty({ icon, title, sub, action, onAction }: {
       {sub && <div className="text-xs text-mut mt-1.5 leading-relaxed">{sub}</div>}
       {action && (
         <button onClick={onAction} className="mt-5 px-6 h-10 rounded-(--r-ctl) bg-primary text-on-primary text-[13px] font-bold pressable">{action}</button>
+      )}
+      {secondary && (
+        <button onClick={onSecondary} className="mt-3 px-4 h-8 text-[12px] text-mut pressable">{secondary}</button>
       )}
     </div>
   );

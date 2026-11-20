@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { api, platform as envPlatform } from "./api";
+import { api, hostOf, platform as envPlatform } from "./api";
 import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity } from "./html";
 import type { User } from "./types";
 
@@ -129,6 +129,11 @@ type Store = {
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
   strictSecurity: boolean; strictSecurityReady: boolean; securityPending: boolean; cliRelaxed: boolean; setStrictSecurity: (on: boolean) => Promise<void>;
   toasts: Toast[]; toast: (msg: string, icon?: Toast["icon"]) => void;
+  /** 线路面板（全局唯一）。`guided`：因「当前线路连不上」打开，自动刷新镜像并检测。 */
+  linePicker: { open: boolean; guided: boolean };
+  openLinePicker: (guided?: boolean) => void; closeLinePicker: () => void;
+  /** 每切换一次线路 +1，页面据此重新加载 */
+  lineEpoch: number; bumpLineEpoch: () => void;
 };
 
 const Ctx = createContext<Store>(null as unknown as Store);
@@ -173,6 +178,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setCliRelaxed(!!r.cli_relaxed);
       })
       .catch(() => { /* 离线也能用 */ });
+    // 冷启动自动选线路：结束后以最终线路的登录态为准（镜像上是游客），并告诉用户换了线路。
+    // 首页等业务请求在 Rust 侧已经等选线路结束才发出，这里不用再触发重新加载。
+    api.lineReady()
+      .then((r) => {
+        if (!r.auto) return;
+        setUser(r.user && (r.user as User).id ? (r.user as User) : null);
+        toast(`原线路连不上，已自动切换到 ${hostOf(r.base)}${r.logged_in ? "" : "（游客浏览）"}`, "info");
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const setStrictSecurity = useCallback(async (on: boolean) => {
@@ -192,6 +207,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setToasts((t) => [...t.slice(-2), { id, msg, icon }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2200);
   }, []);
+
+  const [linePicker, setLinePicker] = useState({ open: false, guided: false });
+  const openLinePicker = useCallback((guided = false) => setLinePicker({ open: true, guided }), []);
+  const closeLinePicker = useCallback(() => setLinePicker((s) => ({ ...s, open: false })), []);
+  const [lineEpoch, setLineEpoch] = useState(0);
+  const bumpLineEpoch = useCallback(() => setLineEpoch((n) => n + 1), []);
 
   const setTab = useCallback((t: Tab) => { setTabRaw(t); setStack([]); setCleanState(false); }, []);
   const push = useCallback((pg: PageInput) => {
@@ -301,7 +322,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast,
-  }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
+    linePicker, openLinePicker, closeLinePicker, lineEpoch, bumpLineEpoch,
+  }), [linePicker, openLinePicker, closeLinePicker, lineEpoch, bumpLineEpoch,
+    theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setMuteOnStartup, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, theater, setTheater, fs, setFs, clean, setClean]);
